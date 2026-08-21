@@ -1,16 +1,15 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import electron from 'vite-plugin-electron'
 
-// https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
-  server: {
-    port: 5173,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-    },
-  }, // 这里补全了闭合的 `}` 和 `,`
+  plugins: [
+    react(),
+    electron({
+      entry: 'electron-main.cjs',
+      // 显式指定 electron 包的位置
+      electron: 'electron',
+    })
+  ],
+  // ...其他配置
 })

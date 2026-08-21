@@ -3,24 +3,48 @@ import io
 from openai import AsyncOpenAI
 from config import Config
 import json
+import base64
+import io
+import json
+import tempfile
+import os
+import librosa
+import soundfile as sf
+from openai import AsyncOpenAI
+from config import Config
+from funasr import AutoModel
 
-#  主脑客户端 (Gemini)
-client_main = AsyncOpenAI(
-    api_key=Config.LLM_API_KEY,
-    base_url=Config.LLM_BASE_URL
-)
+# 主脑客户端（DeepSeek）
+try:
+    client_main = AsyncOpenAI(
+        api_key=Config.LLM_API_KEY,
+        base_url=Config.LLM_BASE_URL
+    )
+    print("✓ 主脑客户端已初始化")
+except (AttributeError, TypeError, Exception) as e:
+    client_main = None
+    print(f"⚠ 主脑客户端初始化失败: {e}")
 
-# 意图客户端 (DeepSeek) (暂时废弃)
-client_intent = AsyncOpenAI(
-    api_key=Config.PROFILE_KEY,
-    base_url=Config.PROFILE_BASE
-)
+# 意图客户端（DeepSeek）- 暂时废弃，直接注释掉不创建
+# try:
+#     client_intent = AsyncOpenAI(
+#         api_key=Config.PROFILE_KEY,
+#         base_url=Config.PROFILE_BASE
+#     )
+# except (AttributeError, TypeError, Exception) as e:
+#     client_intent = None
+#     print(f"⚠ 意图客户端初始化失败: {e}")
 
-# 语音客户端 (SiliconFlow)
-client_audio = AsyncOpenAI(
-    api_key=Config.SILICON_KEY,
-    base_url=Config.SILICON_BASE
-)
+# 语音客户端（TTS/STT）
+try:
+    client_audio = AsyncOpenAI(
+        api_key=Config.SILICON_KEY,
+        base_url=Config.SILICON_BASE
+    )
+    print("✓ 语音客户端已初始化")
+except (AttributeError, TypeError, Exception) as e:
+    client_audio = None
+    print(f"⚠ 语音客户端初始化失败: {e}，将只使用文字模式")
 
 class AIService:
     @staticmethod
@@ -138,6 +162,63 @@ class AIService:
         except Exception as e:
             print(f"❌ STT 失败: {e}")
             return ""
+    # 类级别的 ASR 模型缓存
+    _asr_model = None
+
+    @classmethod
+    def get_asr_model(cls):
+        """懒加载 FunASR 模型（只加载一次）"""
+        if cls._asr_model is None:
+            print("🔄 正在加载本地语音识别模型...")
+            cls._asr_model = AutoModel(
+                model="Qwen/Qwen3-ASR-0.6B",
+                device="cpu",
+                use_onnx=True,
+                vad_model="fsmn-vad",
+                disable_update=True,
+            )
+            print("✅ 本地语音识别模型加载完成")
+        return cls._asr_model
+
+    @classmethod
+    async def speech_to_text_local(cls, audio_base64: str) -> str:
+        """
+        使用本地 FunASR 模型识别语音（替代云端 API）
+        支持 WAV/WebM 格式，自动重采样到 16kHz 单声道
+        """
+        try:
+            # 1. 解码 base64
+            audio_bytes = base64.b64decode(audio_base64)
+            
+            # 2. 保存临时文件（librosa 需要文件路径）
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp.write(audio_bytes)
+                tmp_path = tmp.name
+            
+            try:
+                # 3. 重采样到 16kHz 单声道
+                y, sr = librosa.load(tmp_path, sr=16000, mono=True)
+                processed_path = tmp_path.replace(".wav", "_16k.wav")
+                sf.write(processed_path, y, 16000, subtype='PCM_16')
+                
+                # 4. 调用 FunASR 识别
+                model = cls.get_asr_model()
+                result = model.generate(input=processed_path, language="zh")
+                text = result[0]['text']
+                print(f"🎤 本地语音识别结果: {text}")
+                return text
+                
+            finally:
+                # 清理临时文件
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                if os.path.exists(processed_path):
+                    os.unlink(processed_path)
+                    
+        except Exception as e:
+            print(f"❌ 本地语音识别失败: {e}")
+            return ""
+
     @staticmethod
     async def get_embedding(text: str):
         #向量化

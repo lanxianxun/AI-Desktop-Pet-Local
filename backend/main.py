@@ -78,8 +78,15 @@ async def websocket_endpoint(websocket: WebSocket):
     # 定义发送助手
     async def send_to_frontend(type_str, payload):
         try:
+            # 检查连接状态
+            if not hasattr(websocket, 'client_state') or websocket.client_state.name != "CONNECTED":
+                print(f"⚠️ WebSocket 已断开 ({websocket.client_state.name if hasattr(websocket, 'client_state') else 'unknown'})，无法发送: {type_str}")
+                return
             await websocket.send_json({"type": type_str, "payload": payload})
-        except: pass
+            print(f"📤 已发送: {type_str}")
+        except Exception as e:
+            print(f"❌ 发送消息失败 ({type_str}): {e}")
+            # 不要 raise，避免主循环崩溃
 
     # 启动主动意识循环 (后台任务)
     loop_task = asyncio.create_task(game_loop(websocket, send_to_frontend))
@@ -100,7 +107,7 @@ async def websocket_endpoint(websocket: WebSocket):
             elif packet["type"] == "audio_input":
                 # 语音 -> 文字
                 audio_b64 = packet["payload"]["audio_base64"]
-                text = await AIService.speech_to_text(audio_b64)
+                text = await AIService.speech_to_text_local(audio_b64)
                 if text:
                     # 回显给前端看
                     await send_to_frontend("text_input", {"text": text})
@@ -196,16 +203,27 @@ async def handle_user_input(text: str, send_func):
         brain.update_activity()
 
 async def send_reply(text: str, emotion: str, send_func):
-    #合成语音并发送
+    # 更新状态
     brain.state = "speaking"
-    # 调用 TTS
-    estimated_duration = len(text) * 0.25 + 1.0
-    brain.last_interaction = time.time() + estimated_duration
-    audio_b64 = await AIService.text_to_speech(text, emotion)
-    
+    estimated_duration = (len(text) * 0.8) + 1.0
+    brain.last_interact = time.time()  # 记录当前时间
+    brain.last_interact_duration = estimated_duration  # 新增一个属性
+
+    # --- 核心修改：尝试合成语音，失败则只发文本 ---
+    audio_b64 = None
+    try:
+        # 只在语音客户端存在时尝试合成
+        if AIService.client_audio is not None:
+            audio_b64 = await AIService.text_to_speech(text, emotion)
+        else:
+            print("语音服务未配置，跳过语音合成")
+    except Exception as e:
+        print(f"语音合成失败: {e}，将继续发送文字")
+
+    # 发送消息（无论是否有音频）
     await send_func("audio_chunk", {
         "text": text,
-        "audio_base64": audio_b64,
+        "audio_base64": audio_b64,  # 如果为 None，前端应该只显示文字
         "expression": emotion
     })
 
